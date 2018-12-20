@@ -140,12 +140,52 @@ void crow::capture_message(const std::string& message,
     enqueue_post();
 }
 
+void crow::capture_message_sync(const std::string& message, const json& attributes)
+{
+	std::lock_guard<std::mutex> lock(m_payload_mutex);
+	m_payload["message"] = message;
+	m_payload["event_id"] = nlohmann::crow_utilities::generate_uuid();
+	m_payload["timestamp"] = nlohmann::crow_utilities::get_iso8601();
+
+	if (attributes.is_object())
+	{
+		// logger
+		auto logger = attributes.find("logger");
+		if (logger != attributes.end())
+		{
+			m_payload["logger"] = *logger;
+		}
+
+		// level
+		m_payload["level"] = attributes.value("level", "error");
+
+		// context
+		auto context = attributes.find("context");
+		if (context != attributes.end())
+		{
+			merge_context(*context);
+		}
+
+		// extra
+		auto extra = attributes.find("extra");
+		if (extra != attributes.end())
+		{
+			m_payload["extra"] = *extra;
+		}
+	}
+
+	enqueue_post(true);
+}
+
 
 void crow::capture_exception(const std::exception& exception,
                              const json& context,
                              const bool handled)
 {
     std::stringstream thread_id;
+	std::string uuid = crow_utilities::generate_uuid();
+	add_extra_context({{ "uuid", uuid }});
+
     thread_id << std::this_thread::get_id();
     std::lock_guard<std::mutex> lock(m_payload_mutex);
     m_payload["exception"].push_back({{"type", crow_utilities::pretty_name(typeid(exception).name())},
@@ -154,7 +194,7 @@ void crow::capture_exception(const std::exception& exception,
         {"mechanism", {{"handled", handled}, {"description", handled ? "handled exception" : "unhandled exception"}}},
         {"stacktrace", {{"frames", crow_utilities::get_backtrace()}}},
         {"thread_id", thread_id.str()}});
-    m_payload["event_id"] = crow_utilities::generate_uuid();
+    m_payload["event_id"] = uuid;
     m_payload["timestamp"] = nlohmann::crow_utilities::get_iso8601();
 
     // add given context
@@ -164,6 +204,37 @@ void crow::capture_exception(const std::exception& exception,
 
     // we want to support at most m_maximal_jobs running jobs
     m_jobs.reserve(m_maximal_jobs);
+}
+
+void crow::capture_exception_sync(const std::string exceptionName, 
+	const std::string exceptionMessage,
+	const std::string exceptionModule,
+	json backtrace,
+	const json& context,
+	bool handled)
+{
+	std::stringstream thread_id;
+	std::string uuid = crow_utilities::generate_uuid();
+	add_extra_context({{ "uuid", uuid }});
+
+	thread_id << std::this_thread::get_id();
+	std::lock_guard<std::mutex> lock(m_payload_mutex);
+	m_payload["exception"].push_back({ {"type", exceptionName},
+		{"value", exceptionMessage},
+		{"module", exceptionModule},
+		{"mechanism", {{"handled", handled}, {"description", handled ? "handled exception" : "unhandled exception"}}},
+		{"stacktrace", {{"frames", backtrace}}},
+		{"thread_id", thread_id.str()} });
+	m_payload["event_id"] = uuid;
+	m_payload["timestamp"] = nlohmann::crow_utilities::get_iso8601();
+
+	// add given context
+	merge_context(context);
+
+	enqueue_post(true);
+
+	// we want to support at most m_maximal_jobs running jobs
+	m_jobs.reserve(m_maximal_jobs);
 }
 
 void crow::add_breadcrumb(const std::string& message,
@@ -241,6 +312,12 @@ void crow::add_user_context(const json& data)
 {
     std::lock_guard<std::mutex> lock(m_payload_mutex);
     m_payload["user"].update(data);
+}
+
+void crow::add_custom_context(const std::string tag, const json& data)
+{
+	std::lock_guard<std::mutex> lock(m_payload_mutex);
+	m_payload[tag].update(data);
 }
 
 void crow::add_tags_context(const json& data)
@@ -351,7 +428,7 @@ std::string crow::post(json payload) const
     return curl.post(m_store_url, payload, true).data;
 }
 
-void crow::enqueue_post()
+void crow::enqueue_post(bool sync)
 {
     if (not m_enabled)
     {
@@ -365,8 +442,17 @@ void crow::enqueue_post()
         return;
     }
 
-    // we want to change the job list
-    std::lock_guard<std::mutex> lock_jobs(m_jobs_mutex);
+	// we want to change the job list
+	std::lock_guard<std::mutex> lock_jobs(m_jobs_mutex);
+
+	// if we are doing this synchronously
+	if (sync)
+	{
+		// add the new job
+		json::parse(post(m_payload)).at("id").get<std::string>();
+
+		return;
+	}
 
     // remember we made a post and now can rely on a last id
     m_posts = true;
