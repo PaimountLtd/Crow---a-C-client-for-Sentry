@@ -52,14 +52,12 @@ crow* crow::m_client_that_installed_termination_handler = nullptr;
 
 crow::crow(const std::string& dsn,
 		   const std::string& minidumpUrl,
-		   const std::string& project_id,
            const json& context,
            const double sample_rate,
            const bool install_handlers)
     : m_sample_rate(static_cast<int>(sample_rate * 100.0))
     , m_enabled(not dsn.empty())
 	, m_minidump_url(minidumpUrl)
-	, m_project_id(project_id)
 {
     // process DSN
     if (not dsn.empty())
@@ -180,7 +178,6 @@ void crow::capture_message_sync(const std::string& message, const json& attribut
 
 	enqueue_post(true);
 }
-
 
 void crow::capture_exception(const std::exception& exception,
                              const json& context,
@@ -417,25 +414,23 @@ void crow::clear_context()
     }
 }
 
-void crow::register_file_upload(std::string fileName, std::string filePath)
+void crow::register_minidump_upload(std::string filepath)
 {
-	m_file_uploads.push_back({ fileName, filePath });
+	m_minidump_file = filepath;
+}
+
+void crow::register_file_upload(std::string filepath)
+{
+	m_file_uploads.push_back(filepath);
 }
 
 std::string crow::post(json payload) const
 {
     curl_wrapper curl;
 
-	if (m_file_uploads.size() > 0)
+	if (m_minidump_file.length() > 0)
 	{
-		// add security header
-		std::string security_header = "X-Sentry-Auth: Sentry sentry_version=5,sentry_client=crow/";
-		security_header += std::string(NLOHMANN_CROW_VERSION) + ",sentry_timestamp=";
-		security_header += std::to_string(crow_utilities::get_timestamp());
-		security_header += ",sentry_key=" + m_public_key;
-		curl.set_header(security_header.c_str());
-
-		return curl.post(m_minidump_url, payload.dump(), m_file_uploads).data;
+		curl.post(m_minidump_url, payload.dump(), m_minidump_file, m_file_uploads);
 	}
 	else
 	{
@@ -444,10 +439,13 @@ std::string crow::post(json payload) const
 		security_header += std::string(NLOHMANN_CROW_VERSION) + ",sentry_timestamp=";
 		security_header += std::to_string(crow_utilities::get_timestamp());
 		security_header += ",sentry_key=" + m_public_key;
+		security_header += ",sentry_secret=" + m_secret_key;
 		curl.set_header(security_header.c_str());
 
-		return curl.post(m_store_url, payload, true).data;
+		return curl.post(m_store_url, payload.dump(), true).data;
 	}
+
+	return "";
 }
 
 void crow::enqueue_post(bool sync)
@@ -471,7 +469,7 @@ void crow::enqueue_post(bool sync)
 	if (sync)
 	{
 		// add the new job
-		json::parse(post(m_payload)).at("id").get<std::string>();
+		post(m_payload);
 
 		return;
 	}
